@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Laporan Pendapatan Harian</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:18px;background:#f7f9fc;color:#111}
+    .card{background:#fff;border-radius:10px;padding:18px;box-shadow:0 6px 18px rgba(12,20,30,0.08);max-width:900px;margin:auto}
+    label{display:block;margin-top:8px;font-weight:600}
+    input,select,button,textarea{width:100%;padding:10px;border-radius:8px;border:1px solid #d6dce6;margin-top:6px}
+    .row{display:flex;gap:12px}
+    .row .col{flex:1}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{border-bottom:1px solid #eef2f7;padding:8px;text-align:left}
+    th{background:#fbfdff}
+    .actions{display:flex;gap:8px}
+    .muted{color:#556; font-size:0.9rem}
+    .total{font-weight:800;font-size:1.1rem;margin-top:12px}
+    .host-notice{font-size:0.9rem;color:#555;margin-bottom:8px}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Laporan Pendapatan Harian</h2>
+
+    <label>Tanggal</label>
+    <input id="tanggalInput" type="date" />
+    <p class="host-notice">Aplikasi ini menyimpan data <strong>secara permanen</strong> jika Anda memasang konfigurasi Firebase Firestore. Tanpa konfigurasi, data disimpan di <em>localStorage</em> (tetap ada di browser yang sama, tidak bisa diakses lewat internet dari perangkat lain).</p>
+
+    <label>Nama Petugas</label>
+    <input id="namaPetugas" placeholder="Nama petugas..." />
+
+    <div class="row">
+      <div class="col">
+        <label>Nama Toko</label>
+        <input id="namaToko" placeholder="Nama toko..." />
+      </div>
+      <div class="col">
+        <label>Lokasi</label>
+        <input id="lokasi" placeholder="Contoh: Jl. Sudirman No.1" />
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="col">
+        <label>Ship (pagi / malam)</label>
+        <select id="shift">
+          <option value="pagi">Pagi</option>
+          <option value="malam">Malam</option>
+        </select>
+      </div>
+      <div class="col">
+        <label>Total Pendapatan (Rp)</label>
+        <input id="total" type="number" placeholder="0" />
+      </div>
+    </div>
+
+    <label>Keterangan (opsional)</label>
+    <textarea id="note" rows="2" placeholder="Catatan..."></textarea>
+
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <button id="saveBtn">Simpan Laporan</button>
+      <button id="exportBtn">Export CSV</button>
+      <button id="clearBtn">Hapus Semua (Hanya localStorage)</button>
+      <div class="muted">Status: <span id="status">Mencoba sambungan...</span></div>
+    </div>
+
+    <h3 style="margin-top:18px">Daftar Laporan</h3>
+    <table id="table">
+      <thead><tr><th>Tanggal</th><th>Laporan</th><th>Petugas</th><th>Toko</th><th>Lokasi</th><th>Shift</th><th>Total (Rp)</th><th>Catatan</th><th>Aksi</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="total">Total Semua: Rp <span id="grandTotal">0</span></div>
+
+    <hr style="margin-top:18px" />
+    <h4>Pengaturan (opsional)</h4>
+    <p class="muted">Jika ingin agar aplikasi ini bisa diakses dari internet dan data tersimpan di server: daftarkan project di Firebase → Firestore → lalu paste konfigurasi di bawah ini. Jika tidak, lewati saja dan aplikasi akan pakai <em>localStorage</em>.</p>
+    <label>Firebase Config (kosongkan untuk pakai localStorage)</label>
+    <textarea id="firebaseConfig" rows="6" placeholder="Contoh: paste object config firebase di sini (JSON)"></textarea>
+    <div style="margin-top:8px;display:flex;gap:8px"><button id="applyFb">Gunakan Config</button><button id="resetFb">Reset Config</button></div>
+
+    <p class="muted" style="margin-top:12px">Petunjuk hosting: Anda bisa mengunggah file HTML ini ke GitHub Pages, Netlify, atau hosting statik lain. Jika menggunakan Firebase config, pastikan Firestore rules mengizinkan akses yang diperlukan.</p>
+  </div>
+
+<script>
+// ---------- STORAGE LAYER ----------
+let useFirestore = false;
+let db = null; // firestore reference
+
+// If user pastes a Firebase config as JSON into the textarea and clicks apply, we'll init firestore.
+
+async function initFirestore(configObj){
+  try{
+    // load firebase scripts dynamically
+    if(!window.firebase){
+      await loadScript('https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js');
+      await loadScript('https://www.gstatic.com/firebasejs/9.22.0/firebase-firestore-compat.js');
+    }
+    firebase.initializeApp(configObj);
+    db = firebase.firestore();
+    useFirestore = true;
+    setStatus('Terhubung ke Firestore');
+    await loadAll();
+  }catch(e){
+    console.error(e);
+    alert('Gagal inisialisasi Firebase. Periksa konfigurasi di console. Akan kembali ke localStorage.');
+    useFirestore = false;
+    db = null;
+    setStatus('Menggunakan localStorage (Firebase error)');
+    await loadAll();
+  }
+}
+
+function loadScript(src){
+  return new Promise((res,rej)=>{
+    const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s);
+  });
+}
+
+function setStatus(t){document.getElementById('status').innerText = t}
+
+// Firestore CRUD
+async function fbSave(entry){
+  const col = db.collection('laporan_pendapatan');
+  entry.createdAt = firebase.firestore.FieldValue.serverTimestamp();
+  const ref = await col.add(entry);
+  return {...entry, id: ref.id};
+}
+async function fbLoadAll(){
+  const snap = await db.collection('laporan_pendapatan').orderBy('createdAt','desc').get();
+  return snap.docs.map(d=>({id:d.id,...d.data(), createdAt:d.data().createdAt? d.data().createdAt.toDate().toISOString() : null}));
+}
+async function fbDelete(id){
+  await db.collection('laporan_pendapatan').doc(id).delete();
+}
+
+// localStorage CRUD
+const LS_KEY = 'laporan_pendapatan_v1';
+function lsSave(entry){
+  const all = lsLoadAll();
+  entry.id = 'ls_'+Date.now();
+  entry.createdAt = new Date().toISOString();
+  all.unshift(entry);
+  localStorage.setItem(LS_KEY, JSON.stringify(all));
+  return entry;
+}
+function lsLoadAll(){
+  try{const raw = localStorage.getItem(LS_KEY); return raw? JSON.parse(raw): [];}catch(e){return []}
+}
+function lsDelete(id){
+  const all = lsLoadAll().filter(x=>x.id!==id);
+  localStorage.setItem(LS_KEY, JSON.stringify(all));
+}
+function lsClear(){localStorage.removeItem(LS_KEY)}
+
+// ---------- UI ----------
+const tableBody = document.querySelector('#table tbody');
+const grandTotalEl = document.getElementById('grandTotal');
+
+function formatRp(n){ if(n==null) return '0'; return Number(n).toLocaleString('id-ID'); }
+
+function renderRows(rows){
+  tableBody.innerHTML = '';
+  let total = 0;
+  rows.forEach(r=>{
+    total += Number(r.total||0);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${r.createdAt?new Date(r.createdAt).toLocaleString():''}</td><td>${escapeHtml(r.note||'')}</td>
+      <td>${r.createdAt?new Date(r.createdAt).toLocaleString():''}</td>
+      <td>${escapeHtml(r.namaPetugas||'')}</td>
+      <td>${escapeHtml(r.namaToko||'')}</td>
+      <td>${escapeHtml(r.lokasi||'')}</td>
+      <td>${escapeHtml(r.shift||'')}</td>
+      <td>Rp ${formatRp(r.total)}</td>
+      <td>${escapeHtml(r.note||'')}</td>
+      <td class="actions"><button data-id="${r.id}" class="delBtn">Hapus</button></td>`;
+    tableBody.appendChild(tr);
+  });
+  grandTotalEl.innerText = formatRp(total);
+}
+
+function escapeHtml(s){ return (s+'').replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;" })[c]); }
+
+// ---------- App logic ----------
+async function loadAll(){
+  setStatus(useFirestore? 'Mengambil data dari Firestore...' : 'Mengambil data dari localStorage...');
+  try{
+    let rows = [];
+    if(useFirestore && db){ rows = await fbLoadAll(); }
+    else rows = lsLoadAll();
+    renderRows(rows);
+    setStatus(useFirestore? 'Terhubung ke Firestore' : 'Menggunakan localStorage');
+  }catch(e){console.error(e); setStatus('Error load data');}
+}
+
+async function saveEntry(){
+  const entry = {
+    namaPetugas: document.getElementById('namaPetugas').value.trim(),
+    namaToko: document.getElementById('namaToko').value.trim(),
+    lokasi: document.getElementById('lokasi').value.trim(),
+    shift: document.getElementById('shift').value,
+    total: Number(document.getElementById('total').value)||0,
+    note: document.getElementById('note').value.trim()
+  };
+  if(!entry.namaPetugas || !entry.namaToko){ alert('Nama petugas dan nama toko harus diisi'); return; }
+  setStatus('Menyimpan...');
+  try{
+    let saved;
+    if(useFirestore && db){ saved = await fbSave(entry); }
+    else { saved = lsSave(entry); }
+    await loadAll();
+    setStatus('Tersimpan');
+    // clear inputs
+    document.getElementById('total').value=''; document.getElementById('note').value='';
+  }catch(e){console.error(e); setStatus('Gagal menyimpan'); alert('Gagal menyimpan: lihat console');}
+}
+
+async function deleteEntry(id){
+  if(!confirm('Yakin ingin menghapus laporan ini?')) return;
+  try{
+    if(useFirestore && db){ await fbDelete(id); }
+    else lsDelete(id);
+    await loadAll();
+  }catch(e){console.error(e); alert('Gagal hapus');}
+}
+
+function exportCSV(){
+  const rows = useFirestore && db ? null : lsLoadAll();
+  // if using firestore, try to fetch all first
+  (async ()=>{
+    let data = rows;
+    if(useFirestore && db){ data = await fbLoadAll(); }
+    if(!data) data = [];
+    const header = ['Tanggal','NamaPetugas','NamaToko','Lokasi','Shift','Total','Note'];
+    const lines = [header.join(',')];
+    data.forEach(r=>{
+      const line = [r.createdAt||'', r.namaPetugas||'', r.namaToko||'', r.lokasi||'', r.shift||'', r.total||0, '"'+(r.note||'').replace(/"/g,'""')+'"'];
+      lines.push(line.join(','));
+    });
+    const blob = new Blob([lines.join('\n')], {type:'text/csv'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = 'laporan_pendapatan.csv'; a.click(); URL.revokeObjectURL(url);
+  })();
+}
+
+// event delegated delete
+tableBody.addEventListener('click', e=>{
+  if(e.target.classList.contains('delBtn')){
+    const id = e.target.getAttribute('data-id'); deleteEntry(id);
+  }
+});
+
+// init
+document.getElementById('saveBtn').addEventListener('click', saveEntry);
+document.getElementById('exportBtn').addEventListener('click', exportCSV);
+document.getElementById('clearBtn').addEventListener('click', ()=>{ if(confirm('Hapus semua data di localStorage?')){ lsClear(); loadAll(); } });
+
+// Firebase config apply
+document.getElementById('applyFb').addEventListener('click', async ()=>{
+  const txt = document.getElementById('firebaseConfig').value.trim();
+  if(!txt){ alert('Tempelkan object konfigurasi Firebase (JSON) ke kotak konfigurasi atau kosongkan untuk localStorage.'); return; }
+  let obj = null;
+  try{ obj = JSON.parse(txt); }catch(e){ alert('JSON tidak valid. Pastikan Anda menempelkan object config Firebase dalam format JSON.'); return; }
+  await initFirestore(obj);
+});
+
+// Reset firebase selection to localStorage
+document.getElementById('resetFb').addEventListener('click', ()=>{ if(confirm('Kembali ke localStorage?')){ useFirestore=false; db=null; document.getElementById('firebaseConfig').value=''; setStatus('Menggunakan localStorage'); loadAll(); } });
+
+// helper: try to auto-load if user left config
+window.addEventListener('load', ()=>{
+  setStatus('Siap. Memuat data...');
+  if(localStorage.getItem('firebase_config_json')){
+    try{ const cfg = JSON.parse(localStorage.getItem('firebase_config_json')); initFirestore(cfg); document.getElementById('firebaseConfig').value = JSON.stringify(cfg, null, 2); }
+    catch(e){ loadAll(); }
+  }else{
+    loadAll();
+  }
+});
+
+// save config into localStorage on apply (so it auto reconnects)
+const origInitFirestore = initFirestore;
+initFirestore = async function(cfg){ localStorage.setItem('firebase_config_json', JSON.stringify(cfg)); return origInitFirestore(cfg); }
+
+</script>
+</body>
+</html>
